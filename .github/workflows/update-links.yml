@@ -3,15 +3,16 @@ name: Update Share Links
 on:
   push:
     paths:
-      - "*.scripting"
-      - "**/*.scripting"
+      - "*.scripting"       # 根目录
+      - "**/*.scripting"    # 子目录
     branches:
       - main
-  workflow_dispatch:   # 支持手动触发
+  workflow_dispatch:       # 支持手动触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -24,7 +25,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Generate links
+      - name: Generate links and update README
         run: node scripts/update_links.js
 
       - name: Commit changes
