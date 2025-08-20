@@ -1,40 +1,49 @@
-import { execSync } from "child_process";
-import fs from "fs";
-import path from "path";
+const fs = require("fs");
+const path = require("path");
 
-const repo = "ScriptingApp/Community-Scripts";
-const branch = "main";
-const readmePath = path.resolve("README.md");
+// 项目根目录
+const scriptingDir = path.resolve(__dirname, "../");
+const readmePath = path.resolve(scriptingDir, "README.md");
 
-// 获取这次提交中新增的 .scripting 文件
-const diffOutput = execSync("git diff --name-status HEAD~1 HEAD", { encoding: "utf-8" });
-const addedFiles = diffOutput
-  .split("\n")
-  .filter(line => (line.startsWith("A") || line.startsWith("M")) && line.endsWith(".scripting"))
-  .map(line => line.split("\t")[1]);
+let collectedLinks = [];
 
-if (addedFiles.length === 0) {
-  console.log("No new .scripting files added.");
-  process.exit(0);
+// 遍历目录，收集 .scripting 文件
+function walkDir(dir, callback) {
+    fs.readdirSync(dir).forEach((file) => {
+        const filepath = path.join(dir, file);
+        if (fs.statSync(filepath).isFile() && filepath.endsWith(".scripting")) {
+            callback(filepath);
+        }
+    });
 }
 
-// 生成分享链接
-const links = addedFiles.map(f => {
-  const relative = encodeURIComponent(f);
-  const rawUrl = `https://github.com/${repo}/raw/refs/heads/${branch}/${relative}`;
-  const shareUrl = `https://scripting.fun/import_scripts?urls=%5B%22${encodeURIComponent(rawUrl)}%22%5D`;
-  return `- [${path.basename(f)}](${shareUrl})`;
+// 生成 scripting.fun 链接
+function generateScriptLink(filename) {
+    const baseUrl = "https://github.com/ScriptingApp/Community-Scripts/raw/refs/heads/main/";
+    const fullUrl = baseUrl + encodeURIComponent(path.basename(filename));
+    const name = path.basename(filename, ".scripting"); // 去掉后缀
+    const link = `https://scripting.fun/import_scripts?urls=${encodeURIComponent(`[\"${fullUrl}\"]`)}`;
+    return { name, link };
+}
+
+// 收集所有链接
+walkDir(scriptingDir, (file) => {
+    collectedLinks.push(generateScriptLink(file));
 });
 
-let readme = fs.existsSync(readmePath) ? fs.readFileSync(readmePath, "utf-8") : "";
+// 写入 README.md
+let readmeContent = fs.existsSync(readmePath) ? fs.readFileSync(readmePath, "utf-8") : "";
+const startTag = "<!-- SCRIPTS_LINKS_START -->";
+const endTag = "<!-- SCRIPTS_LINKS_END -->";
+const linksMarkdown = collectedLinks.map(({ name, link }) => `- [${name}](${link})`).join("\n");
+const replacement = `${startTag}\n${linksMarkdown}\n${endTag}`;
 
-const marker = "<!-- AUTO_LINKS -->";
-if (!readme.includes(marker)) {
-  // 如果没有标记，追加到文件末尾
-  readme += `\n\n${marker}\n## 分享链接\n\n${links.join("\n")}\n${marker}\n`;
+// 替换或追加
+if (readmeContent.includes(startTag)) {
+    readmeContent = readmeContent.replace(new RegExp(`${startTag}[\\s\\S]*?${endTag}`), replacement);
 } else {
-  // 在 marker 前插入新增的链接
-  readme = readme.replace(marker, `${links.join("\n")}\n\n${marker}`);
+    readmeContent += `\n\n${replacement}\n`;
 }
 
-fs.writeFileSync(readmePath, readme);
+fs.writeFileSync(readmePath, readmeContent, "utf-8");
+console.log("README.md updated with latest links.");
