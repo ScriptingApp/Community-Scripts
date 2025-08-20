@@ -6,7 +6,8 @@ on:
       - "*.scripting"   # 只监听新增或修改的 .scripting 文件
     branches:
       - main
-
+  workflow_dispatch: 
+  
 jobs:
   build:
     runs-on: ubuntu-latest
