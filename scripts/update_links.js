@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 
-// 项目根目录（本地或 GitHub Actions 都可用）
+// 项目根目录
 const projectRoot = process.env.GITHUB_WORKSPACE || path.resolve(__dirname, "../");
 const scriptingDir = projectRoot;
 const readmePath = path.join(projectRoot, "README.md");
@@ -41,17 +41,14 @@ let readmeContent = fs.existsSync(readmePath) ? fs.readFileSync(readmePath, "utf
 const startTag = "<!-- SCRIPTS_LINKS_START -->";
 const endTag = "<!-- SCRIPTS_LINKS_END -->";
 
-// Markdown 列表 + 时间戳保证每次文件内容变化
 const linksMarkdown = collectedLinks.map(({ name, link }) => `- [${name}](${link})`).join("\n");
 const replacement = `${startTag}\n${linksMarkdown}\n<!-- updated at ${new Date().toISOString()} -->\n${endTag}`;
 
-// 替换或追加
 if (readmeContent.includes(startTag)) {
     readmeContent = readmeContent.replace(new RegExp(`${startTag}[\\s\\S]*?${endTag}`), replacement);
 } else {
     readmeContent += `\n\n${replacement}\n`;
 }
 
-// 写入 README.md
 fs.writeFileSync(readmePath, readmeContent, "utf-8");
 console.log("README.md updated with latest links.");
