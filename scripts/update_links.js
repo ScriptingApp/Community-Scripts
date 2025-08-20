@@ -52,6 +52,6 @@ if (readmeContent.includes(startTag)) {
     readmeContent += `\n\n${replacement}\n`;
 }
 
-// 写入 README.md，workflow 会自动提交
+// 写入 README.md
 fs.writeFileSync(readmePath, readmeContent, "utf-8");
 console.log("README.md updated with latest links.");
