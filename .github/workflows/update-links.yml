@@ -3,11 +3,11 @@ name: Update Share Links
 on:
   push:
     paths:
-      - "*.scripting"       # 根目录
-      - "**/*.scripting"    # 子目录
+      - "*.scripting"
+      - "**/*.scripting"
     branches:
       - main
-  workflow_dispatch:       # 支持手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -33,7 +33,8 @@ jobs:
           git config user.name "${GITHUB_ACTOR}"
           git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
           git add README.md
-          git commit -m "chore: auto update share links" || echo "No changes"
-          git push
+          git diff-index --quiet HEAD || git commit -m "chore: auto update share links"
+          # 使用 token 进行推送
+          git push "https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
