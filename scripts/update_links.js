@@ -1,14 +1,14 @@
 const fs = require("fs");
 const path = require("path");
 
-// 获取项目根目录（GitHub Actions 中可用 GITHUB_WORKSPACE）
+// 项目根目录（本地或 GitHub Actions 都可用）
 const projectRoot = process.env.GITHUB_WORKSPACE || path.resolve(__dirname, "../");
 const scriptingDir = projectRoot;
 const readmePath = path.join(projectRoot, "README.md");
 
 let collectedLinks = [];
 
-// 遍历目录，收集 .scripting 文件
+// 遍历目录（递归收集 .scripting 文件）
 function walkDir(dir, callback) {
     fs.readdirSync(dir).forEach((file) => {
         const filepath = path.join(dir, file);
@@ -16,7 +16,7 @@ function walkDir(dir, callback) {
         if (stat.isFile() && filepath.endsWith(".scripting")) {
             callback(filepath);
         } else if (stat.isDirectory()) {
-            walkDir(filepath, callback); // 递归子目录
+            walkDir(filepath, callback);
         }
     });
 }
@@ -24,7 +24,7 @@ function walkDir(dir, callback) {
 // 生成 scripting.fun 链接
 function generateScriptLink(filename) {
     const baseUrl = "https://github.com/ScriptingApp/Community-Scripts/raw/refs/heads/main/";
-    const relativePath = path.relative(scriptingDir, filename).replace(/\\/g, "/"); // 保留目录结构
+    const relativePath = path.relative(scriptingDir, filename).replace(/\\/g, "/");
     const fullUrl = baseUrl + encodeURIComponent(relativePath);
     const name = path.basename(filename, ".scripting"); // 去掉后缀
     const link = `https://scripting.fun/import_scripts?urls=${encodeURIComponent(`[\"${fullUrl}\"]`)}`;
@@ -41,7 +41,7 @@ let readmeContent = fs.existsSync(readmePath) ? fs.readFileSync(readmePath, "utf
 const startTag = "<!-- SCRIPTS_LINKS_START -->";
 const endTag = "<!-- SCRIPTS_LINKS_END -->";
 
-// Markdown 列表 + 时间戳保证内容每次都变
+// Markdown 列表 + 时间戳保证每次文件内容变化
 const linksMarkdown = collectedLinks.map(({ name, link }) => `- [${name}](${link})`).join("\n");
 const replacement = `${startTag}\n${linksMarkdown}\n<!-- updated at ${new Date().toISOString()} -->\n${endTag}`;
 
@@ -52,6 +52,6 @@ if (readmeContent.includes(startTag)) {
     readmeContent += `\n\n${replacement}\n`;
 }
 
-// 写入 README.md，GitHub Actions workflow 会提交
+// 写入 README.md，workflow 会自动提交
 fs.writeFileSync(readmePath, readmeContent, "utf-8");
 console.log("README.md updated with latest links.");
