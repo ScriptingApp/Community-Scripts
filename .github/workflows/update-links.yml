@@ -3,7 +3,7 @@ name: Update Share Links
 on:
   push:
     paths:
-      - "**/*.scripting"   # 只监听新增或修改的 .scripting 文件
+      - "*.scripting"   # 只监听新增或修改的 .scripting 文件
     branches:
       - main
 
