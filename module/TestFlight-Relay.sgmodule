@@ -1,0 +1,7 @@
+#!name=TestFlight Relay
+#!desc=Request脚本中转、多账号索引合并和详情缓存；需将relay.js放到配置可解析的路径
+
+[Script]
+TF-Relay = type=http-request,pattern=^http://tf-relay\.test(?::8799)?/,requires-body=true,max-size=1048576,timeout=60,debug=1,script-path=https://raw.githubusercontent.com/ScriptingApp/Community-Scripts/refs/heads/main/module/scripts/TestFlight-Relay.js
+# 每天00、05、10、15、20点强制重新认证；账号之间并发。
+TF-Relay-Refresh = type=cron,cronexp="0 */5 * * *",timeout=300,script-path=https://raw.githubusercontent.com/ScriptingApp/Community-Scripts/refs/heads/main/module/scripts/TestFlight-Relay.js
