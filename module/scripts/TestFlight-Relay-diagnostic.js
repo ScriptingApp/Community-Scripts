@@ -1,3 +1,32 @@
+// TF Relay · Loon initialize diagnostics · 2026-11-10
+
+const diagnosticShape = value => ({
+  type: value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value,
+  length: typeof value === 'string' ? value.length : null,
+  bytes: typeof value?.byteLength === 'number' ? value.byteLength : null,
+  format: typeof value !== 'string' ? null : !value.trim() ? 'empty'
+    : /^[{[]/.test(value.trim()) ? 'json-container' : value.trim()[0] === '"' ? 'quoted'
+    : /^[^=&\s]+=[^]*$/.test(value) ? 'key-value' : 'other',
+});
+const diagnosticTrace = (stage, data = {}) => console.log('[DEBUG-loon-init] ' + JSON.stringify({stage, ...data}));
+const diagnosticRequest = () => {
+  const request = globalThis.$request;
+  const headers = request?.headers || {};
+  const field = name => Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
+  const media = String(field('content-type') || '').split(';')[0].toLowerCase();
+  const length = String(field('content-length') || '');
+  diagnosticTrace('entry', {
+    platform: globalThis.$loon ? 'Loon' : globalThis.$task ? 'QX' : 'Surge-compatible',
+    request: !!request,
+    method: ['GET','POST','DELETE','PUT','PATCH','HEAD','OPTIONS'].includes(request?.method) ? request.method : 'other',
+    initialize: /\/api\/v1\/control\/initialize(?:[?#]|$)/.test(request?.url || ''),
+    argument: diagnosticShape(globalThis.$argument), body: diagnosticShape(request?.body),
+    bodyBytes: diagnosticShape(request?.bodyBytes),
+    contentType: ['application/json','text/plain','application/octet-stream','application/x-www-form-urlencoded'].includes(media) ? media : 'other-or-missing',
+    contentLength: /^\d+$/.test(length) ? Number(length) : null,
+    contentEncodingPresent: field('content-encoding') !== undefined,
+  });
+};
 // ===== 平台适配层：请求 / 永久存储 / 结束执行 =====
 // 当前适配 Surge；更换平台只替换本区 API 实现，不放账号、签名或缓存策略。
 /** 通用 HTTP：首次调用探测并缓存适配器；GET/POST、Promise、超时（秒）。 */
@@ -76,6 +105,7 @@ const storage = {
  * @param {Object} [result]
  */
 const finish = result => {
+  diagnosticTrace('finish', {status: result?.response?.status ?? null, forwarded: !!result?.url});
      if (globalThis.$task && result)  {
          const { response = result } = result
          $done({ ...response, status: `HTTP/1.1 ${response.status} OK` });
@@ -83,6 +113,14 @@ const finish = result => {
          $done(result)
      }
 }
+
+/** 通用系统通知；通知不可用不妨碍本地错误响应和脚本结束。 */
+const notify = (title, message) => {
+  try {
+    if (globalThis.$notification?.post) $notification.post(title, "", message);
+    else if (typeof globalThis.$notify === "function") $notify(title, "", message);
+  } catch { console.log("[TF-Relay] notification unavailable"); }
+};
 
 // ===== 平台适配层结束 =====
 
@@ -186,7 +224,8 @@ const clean = (headers, extra = []) => {
 /**
  * @param {*} text
  */
-const exactParse = text => {
+const exactParse = (text, diagnosticLabel = 'other') => {
+  diagnosticTrace('json-input', {source: diagnosticLabel, ...diagnosticShape(text)});
   const tokens = /"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
   try {
     return JSON.parse(
@@ -197,6 +236,7 @@ const exactParse = text => {
       })
     );
   } catch (error) {
+    diagnosticTrace('json-failed', {source: diagnosticLabel, ...diagnosticShape(text)});
     logError(new Error("Malformed JSON"));
     throw new Error("Malformed JSON");
   }
@@ -600,16 +640,16 @@ const performRecovery = async (req, ctx) => {
   const rest = authMaterials(ctx);
   const encoded =
     '{"dsId":' + dsid(ctx.dsId) + "," + JSON.stringify(rest).slice(1);
-  // 会话恢复是独立接口，仍使用已验证 v1；不能套用当前业务接口 version。
+  // 会话恢复按客户端协议选择，不能套用当前业务接口的 v 数字。
   const response = await send(
     req,
     ctx,
-    "/v1/session/authenticate",
+    clientInterfacePath(req, "authenticate"),
     "POST",
     encoded,
     false
   );
-  const payload = requireOK(response);
+  const payload = clientResponse(req, "authenticate", response);
   if (!usableAuth(payload))
     throw new Error("Authentication identity/terms validation failed");
   if (ctx.accountId && ctx.accountId !== String(payload.data.accountId))
@@ -744,7 +784,7 @@ const handleAuthenticate = async req => {
   // 账号登记尽力完成；校验失败、待处理条款、解析或存储失败均保留 Apple 原响应。
   try {
     const requestBody = exactParse($request.body || "");
-    const payload = exactParse(response.body);
+    const payload = clientResponse(req, "authenticate", response);
     if (hasBusinessError(payload)) return response;
     const device = String(requestBody.deviceVendorId || "");
     if (
@@ -825,13 +865,13 @@ const refreshAccountDetails = async (req, indexes) => {
             const reply = await business(
               req,
               req.contexts[owner],
-              id => accountRoute(id, "appDetails", req.version),
+              id => clientInterfacePath(req, "appDetails", id),
               "POST",
               JSON.stringify({
                 apps: entries.map(entry => ({ appId: entry.appId })),
               })
             );
-            const payload = requireOK(reply);
+            const payload = clientResponse(req, "appDetails", reply);
             if (!Array.isArray(payload.data))
               throw new Error("Missing detail array");
             const requested = new Set(entries.map(entry => entry.id));
@@ -897,7 +937,7 @@ const handleIndex = async req => {
           const ctx = contexts[owner];
           const previous = read(accountRecordKey("account-index", owner));
           const requestContext = {
-            version: req.version,
+            version: clientInterfaces(req).apps.version,
             accountId: ctx.accountId,
           };
           const complete =
@@ -932,7 +972,7 @@ const handleIndex = async req => {
           let response = await business(
             req,
             ctx,
-            id => accountRoute(id, "apps", req.version),
+            id => clientInterfacePath(req, "apps", id),
             "GET",
             undefined,
             extraHeaders
@@ -942,7 +982,7 @@ const handleIndex = async req => {
             response = await business(
               req,
               ctx,
-              id => accountRoute(id, "apps", req.version),
+              id => clientInterfacePath(req, "apps", id),
               "GET"
             );
             if (response.status === 304)
@@ -951,9 +991,17 @@ const handleIndex = async req => {
           const reused = response.status === 304;
           const payload = reused
             ? clone(previous.envelope)
-            : requireOK(response);
-          if (!Array.isArray(payload.data?.apps))
-            throw new Error("Index response missing apps array");
+            : clientResponse(req, "apps", response);
+          if (!Array.isArray(payload.data?.apps)) {
+            // 只记录类型，不输出账号 ID、任意字段名或 Apple 响应正文。
+            const type = value => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+            throw Object.assign(new Error(
+              "Index response missing apps array; version=" + req.version +
+              " status=" + response.status + " reused=" + reused +
+              " payload=" + type(payload) + " data=" + type(payload?.data) +
+              " apps=" + type(payload?.data?.apps)
+            ), { response: businessErrorReply(900009, "上游应用列表格式异常，本次未更新缓存", 502) });
+          }
           return {
             owner,
             payload,
@@ -962,7 +1010,7 @@ const handleIndex = async req => {
                 previous.upstreamHttpEtag ||
                 null
               : header(response.headers, "etag") || null,
-            requestContext: { version: req.version, accountId: ctx.accountId },
+            requestContext: { version: clientInterfaces(req).apps.version, accountId: ctx.accountId },
           };
         } catch (error) {
           logError(error);
@@ -1348,11 +1396,11 @@ const handleTrains = async req => {
   const reply = await business(
     req,
     ctx,
-    id => accountRoute(id, suffix, req.version) + req.url.search,
+    id => clientInterfacePath(req, req.operation, id, suffix) + req.url.search,
     "GET"
   );
   if (reply.status !== 200) return reply;
-  const payload = requireOK(reply);
+  const payload = clientResponse(req, req.operation, reply);
   if (!Array.isArray(payload.data))
     throw new Error("History response missing array");
   if (match[3]) {
@@ -1361,7 +1409,7 @@ const handleTrains = async req => {
   }
   const link = header(reply.headers, "link");
   if (!link) return reply;
-  const expectedPath = accountRoute(ctx.accountId, suffix, req.version);
+  const expectedPath = clientInterfacePath(req, req.operation, ctx.accountId, suffix);
   const incomingAccount = req.path.split("/")[3];
   const clientPath =
     "/" + req.version + "/accounts/" + incomingAccount + "/" + suffix;
@@ -1480,21 +1528,20 @@ const handleInstallation = async req => {
   const route = id => {
     if (statusMatch) return path + url.search;
     return (
-      accountRoute(
-        id,
+      clientInterfacePath(
+        req, req.operation, id,
         "apps/" +
           encodeURIComponent(appId) +
           "/builds/" +
           encodeURIComponent(buildId) +
-          (buildMatch?.[3] || ""),
-        req.version
+          (buildMatch?.[3] || "")
       ) + url.search
     );
   };
   const response = await business(req, ctx, route, method, requestBody);
   if (statusMatch || buildMatch?.[3] || response.status !== 200)
     return response;
-  const payload = requireOK(response);
+  const payload = clientResponse(req, req.operation, response);
   const builds = [...(payload.data?.builds || [])];
   if (payload.data?.currentBuild) builds.push(payload.data.currentBuild);
   if (!builds.some(build => String(build.id) === buildId))
@@ -1587,7 +1634,7 @@ const loadAccounts = req => {
 const createRequestContext = () => {
   const config =
     typeof $argument === "string" && $argument.trim()
-      ? exactParse($argument)
+      ? exactParse($argument, "script-argument")
       : {};
   if (Object.keys(config).some(name => name !== "timeout"))
     throw new Error("Only timeout policy is supported");
@@ -1929,8 +1976,8 @@ const importStoreAccount = async req => {
     deviceVendorId: device, deviceModel: profile.deviceModel, deviceName: profile.deviceName };
   const publicHeaders = { ...headers, "Content-Type": "application/json", "X-Apple-AMD-M": body.amd.machine };
   const request = '{"dsId":' + body.identity + ',' + JSON.stringify(authMaterials(materials)).slice(1);
-  const response = await send({ ...req, publicHeaders }, materials, "/v1/session/authenticate", "POST", request, false);
-  const payload = requireOK(response);
+  const response = await send({ ...req, publicHeaders }, materials, clientInterfacePath(req, "authenticate"), "POST", request, false);
+  const payload = clientResponse(req, "authenticate", response);
   if (!usableAuth(payload) || !importText(payload.data.accountId) || !importText(payload.data.sessionId))
     throw importError(422, "authentication_required", "商店凭据未取得有效 TF 会话，或需要确认条款");
   // 网络等待后重新读取目标，保留期间捕获的安装材料，不覆盖其他账号。
@@ -2008,7 +2055,7 @@ const refreshStoreAccount = async req => {
   const refresh = { ...req, device, incomingOwner: owner, orderedOwners: [owner], contexts: { [owner]: ctx },
     // 控制刷新自行构造 JSON 详情请求，不能依赖原 App 曾经捕获的正文类型。
     publicHeaders: { ...clean(read(key("headers", device)) || {}, ["content-type"]), "Content-Type": "application/json" },
-    version: "v4", controlRefresh: true };
+    version: clientInterfaces(req).apps.version, controlRefresh: true };
   await handleIndex(refresh);
   const latest = read(key("context", device, owner));
   if (!latest || latest.dsId !== ctx.dsId) throw importError(409, "account_changed", "账号已变化，请重新读取");
@@ -2216,6 +2263,8 @@ const refreshScheduledAccount = async (ctx, task, report) => {
   saveScheduledReport(report);
 };
 const runScheduledRefresh = async (trigger = "cron") => {
+  // 批次开始前拒绝；不能逐账号报错或发起任何续期请求。
+  resolveClientInterfaces(storedClientVersion());
   const contexts = latestAccountContexts(), startedAt = new Date().toISOString();
   const report = { id: uuid(), trigger, state: "running", startedAt, finishedAt: null, durationMs: null,
     totals: { total: contexts.length, succeeded: 0, failed: 0 },
@@ -2237,10 +2286,12 @@ const runScheduledRefresh = async (trigger = "cron") => {
 
 
 // 中转模块安装后直接使用；仅初始化公开设备模板，不读取或要求管理令牌。
-const controlStatus = () => controlReply(200, { data: { version: 1 } });
+const controlStatus = () => controlReply(200, { data: { version: 1, client: storage.readJSON(CLIENT_PROTOCOL_KEY) } });
 const controlBody = names => {
   let body;
-  try { body = exactParse($request.body || ""); } catch { /* 错误不回显正文。 */ }
+  try { body = exactParse($request.body || "", "control-body"); }
+  catch { diagnosticTrace('control-body-rejected'); }
+  diagnosticTrace('control-body-parsed', {object: importObject(body), clientPresent: !!body?.client, devicePresent: !!body?.device});
   if (!importObject(body) || Object.keys(body).some(name => !names.includes(name)))
     throw importError(400, "invalid_request", "控制请求格式不正确");
   return body;
@@ -2265,23 +2316,27 @@ const resetControl = () => {
   return controlReply(200, { data: { reset: true } });
 };
 const initializeControl = () => {
-  const body = controlBody(["device"]);
+  const body = controlBody(["device", "client"]);
   if (!importObject(body.device)) throw importError(400, "invalid_request", "缺少公开设备资料");
+  diagnosticTrace('initialize-version-start', {client: diagnosticShape(body.client)});
+  const client = configureClientProtocol(body.client);
+  diagnosticTrace('initialize-version-saved');
   const configured = storage.readJSON("tf.management.device");
   if (configured?.deviceVendorId && importText(configured.deviceModel) && importText(configured.deviceName) && header(configured.headers, "User-Agent"))
-    return controlReply(200, { data: { initialized: true } });
+    return controlReply(200, { data: { initialized: true, client } });
   const records = collection(STORAGE_KEYS.accounts).records;
   const devices = importDevices(records);
   if (devices.length > 1) throw importError(409, "device_required", "中转存在多个设备，请先明确使用的设备");
   const device = configured?.deviceVendorId || devices[0] || uuid();
   const previous = (records[key("registry", device)] || []).map(owner => records[key("context", device, owner)]).find(Boolean);
   const headers = importDeviceHeaders(device, {}, { ...body.device.headers, ...configured?.headers });
+  diagnosticTrace('initialize-device-save');
   const profile = { deviceVendorId: device, deviceModel: previous?.deviceModel || configured?.deviceModel || body.device.deviceModel,
     deviceName: previous?.deviceName || configured?.deviceName || body.device.deviceName, headers };
   if (!importText(profile.deviceModel) || !importText(profile.deviceName) || !header(headers, "User-Agent"))
     throw importError(400, "invalid_request", "设备资料缺少型号、名称或 TestFlight User-Agent");
   saveControl("tf.management.device", profile);
-  return controlReply(200, { data: { initialized: true } });
+  return controlReply(200, { data: { initialized: true, client } });
 };
 
 
@@ -2306,47 +2361,137 @@ const controlRoutes = [
 ];
 
 
+// 官方客户端协议：实现按用途独立登记，只有接口改变时才新增 since 规则。
+// 独立于账号、索引、详情和任务集合；不能从请求 URL 的 v 数字推导客户端版本。
+const CLIENT_PROTOCOL_KEY = "tf.client.protocol";
+const MIN_CLIENT_VERSION = "4.4.1";
+// 没有上报结果时使用已验证基线；明确上报的低版本仍按最低版本规则拒绝。
+const storedClientVersion = () => storage.readJSON(CLIENT_PROTOCOL_KEY)?.version ?? MIN_CLIENT_VERSION;
+const clientVersionParts = value => {
+  if (typeof value !== "string" || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value))
+    throw clientProtocolError("client_version_invalid", "无法确认 TestFlight 版本，请从 Scripting 重新读取");
+  const parts = value.split(".").map(Number);
+  if (!parts.every(Number.isSafeInteger)) throw clientProtocolError("client_version_invalid", "TestFlight 版本号无效");
+  return parts;
+};
+const compareClientVersions = (left, right) => {
+  const a = clientVersionParts(left), b = clientVersionParts(right);
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  return 0;
+};
+const clientProtocolError = (code, message) => Object.assign(new Error(message), {
+  status: 426, code, response: businessErrorReply(900010, message, 426),
+});
+const assertClientVersion = version => {
+  clientVersionParts(version);
+  if (compareClientVersions(version, MIN_CLIENT_VERSION) < 0)
+    throw clientProtocolError("client_version_unsupported", "请将 TestFlight 更新至 4.4.1 或更高版本");
+};
+// path 匹配去掉 /vN 后的路径；version、callback 和请求路径一起选择。
+const CLIENT_INTERFACES = {
+  authenticate: [{ since: "4.4.1", version: "v1", method: "POST", path: /^\/session\/authenticate$/, suffix: "session/authenticate",
+    callback: async req => ({ response: await handleAuthenticate(req) }) }],
+  categories: [{ since: "4.4.1", version: "v1", method: "GET", path: /^\/appCategories$/, callback: handleStartupCache }],
+  apns: [{ since: "4.4.1", version: "v1", method: "POST", path: /^\/devices\/apns$/, callback: handleStartupCache }],
+  apps: [{ since: "4.4.1", version: "v4", method: "GET", path: /^\/accounts\/[^/]+\/apps$/, suffix: "apps",
+    decode: requireOK,
+    callback: req => withAccount(req, handleIndex) }],
+  appDetails: [{ since: "4.4.1", version: "v4", method: "POST", path: /^\/accounts\/[^/]+\/appDetails$/, suffix: "appDetails",
+    decode: requireOK,
+    callback: req => withAccount(req, handleDetails) }],
+  trains: [{ since: "4.4.1", version: "v2", method: "GET", path: /^\/accounts\/[^/]+\/apps\/[^/]+\/platforms\/[^/]+\/trains$/,
+    callback: req => withAccount(req, handleTrains) }],
+  trainBuilds: [{ since: "4.4.1", version: "v2", method: "GET", path: /^\/accounts\/[^/]+\/apps\/[^/]+\/platforms\/[^/]+\/trains\/[^/]+\/builds$/,
+    callback: req => withAccount(req, handleTrains) }],
+  build: [{ since: "4.4.1", version: "v2", method: "GET", path: /^\/accounts\/[^/]+\/apps\/[^/]+\/builds\/[^/]+$/, callback: handleBuild }],
+  install: [{ since: "4.4.1", version: "v2", method: "POST", path: /^\/accounts\/[^/]+\/apps\/[^/]+\/builds\/[^/]+\/install$/, callback: handleInstall }],
+  installStatus: [{ since: "4.4.1", version: "v1", method: "POST", path: /^\/apps\/[^/]+\/[^/]+\/install\/status$/, callback: handleInstallStatus }],
+};
+const resolveClientInterfaces = (version, definitions = CLIENT_INTERFACES) => {
+  assertClientVersion(version);
+  return Object.fromEntries(Object.entries(definitions).map(([purpose, variants]) => {
+    const selected = variants.filter(item => compareClientVersions(version, item.since) >= 0)
+      .reduce((latest, item) => !latest || compareClientVersions(item.since, latest.since) > 0 ? item : latest, null);
+    if (!selected) throw clientProtocolError("client_interface_missing", "当前 TestFlight 版本缺少已支持的接口实现");
+    return [purpose, selected];
+  }));
+};
+const clientInterfaces = req => req.clientInterfaces ||= resolveClientInterfaces(storedClientVersion());
+// 变更响应格式的实现可在同一条规则提供 decode，向业务层输出约定的内部格式。
+const clientResponse = (req, purpose, response) => (clientInterfaces(req)[purpose].decode || requireOK)(response, req);
+const configureClientProtocol = client => {
+  client ??= { version: MIN_CLIENT_VERSION };
+  if (!client || typeof client !== "object" || Array.isArray(client) ||
+      Object.keys(client).some(name => !["version", "build"].includes(name)))
+    throw clientProtocolError("client_version_invalid", "请由 Scripting 提交当前 TestFlight 版本");
+  clientVersionParts(client.version);
+  if (client.build !== undefined && (typeof client.build !== "string" || !/^[0-9]+(?:\.[0-9]+)*$/.test(client.build)))
+    throw clientProtocolError("client_version_invalid", "TestFlight 构建号无效");
+  const info = { version: client.version, ...(client.build === undefined ? {} : { build: client.build }) };
+  // 即使降级到了不支持的版本，也保存实际版本，禁止继续沿用之前的高版本。
+  if (JSON.stringify(storage.readJSON(CLIENT_PROTOCOL_KEY)) !== JSON.stringify(info) && !storage.writeJSON(CLIENT_PROTOCOL_KEY, info))
+    throw importError(503, "storage_failed", "无法保存 TestFlight 版本，请重试");
+  assertClientVersion(info.version);
+  return info;
+};
+const clientInterfacePath = (req, purpose, accountId, suffix) => {
+  const implementation = clientInterfaces(req)[purpose];
+  if (!implementation) throw clientProtocolError("client_interface_missing", "未登记 TestFlight 接口");
+  return accountId === undefined ? "/" + implementation.version + "/" + implementation.suffix
+    : accountRoute(accountId, suffix || implementation.suffix, implementation.version);
+};
+const routeClientRequest = req => {
+  const implementations = clientInterfaces(req);
+  const suffix = req.path.replace(/^\/v\d+/, "");
+  const matches = item => item.method === req.method && item.path.test(suffix);
+  if (!Object.values(CLIENT_INTERFACES).some(variants => variants.some(matches))) return;
+  const selected = Object.entries(implementations).find(([, item]) => matches(item));
+  if (!selected || req.version !== selected[1].version)
+    throw clientProtocolError("client_interface_unsupported", "此接口版本不属于当前 TestFlight 协议，请更新客户端后重试");
+  req.operation = selected[0];
+  return selected[1].callback(req);
+};
+
+
 // ===== 入口路由 =====
 /** 路由表仅在闭包内保存；定时执行时不创建请求上下文。 */
 const routeRequest = (() => {
   /** @type {Array<{method: string, path: RegExp, callback: function(RequestContext): *}>} */
-  const appRoutes = [
-    { method: 'GET', path: /^\/v\d+\/appCategories$/, callback: handleStartupCache },
-    { method: 'POST', path: /^\/v\d+\/devices\/apns$/, callback: handleStartupCache },
-    { method: 'POST', path: /^\/v\d+\/session\/authenticate$/, callback: async (req) => ({ response: await handleAuthenticate(req) }) },
-    { method: 'GET', path: /^\/v\d+\/accounts\/[^/]+\/apps\/[^/]+\/platforms\/[^/]+\/trains(?:\/[^/]+\/builds)?$/, callback: (req) => withAccount(req, handleTrains) },
-    { method: 'GET', path: /^\/v\d+\/accounts\/[^/]+\/apps$/, callback: (req) => withAccount(req, handleIndex) },
-    { method: 'POST', path: /^\/v\d+\/accounts\/[^/]+\/appDetails$/, callback: (req) => withAccount(req, handleDetails) },
-    { method: 'GET', path: /^\/v\d+\/accounts\/[^/]+\/apps\/[^/]+\/builds\/[^/]+$/, callback: handleBuild },
-    { method: 'POST', path: /^\/v\d+\/accounts\/[^/]+\/apps\/[^/]+\/builds\/[^/]+\/install$/, callback: handleInstall },
-    { method: 'POST', path: /^\/v\d+\/apps\/[^/]+\/[^/]+\/install\/status$/, callback: handleInstallStatus },
-  ]
-  const routes = [...controlRoutes, ...appRoutes]
-  return async () => {
-    /** @type {RequestContext} */
-    const req = createRequestContext()
+  const routes = controlRoutes
+  return async req => {
     if (rejectControlPath(req)) return { response: controlReply(400, { error: { code: "invalid_request", message: "控制接口路径无效" } }) }
     /** @type {typeof routes[number] | undefined} */
     const route = routes.find((item) => (item.method === "*" || item.method === req.method) && item.path.test(req.path))
-    return route && route.callback(req)
+    return route ? route.callback(req) : routeClientRequest(req)
   }
 })()
 
 // main 只负责执行类型、路由交付与默认转发；错误出口保持不变。
 const main = async () => {
   try {
-    if (!this.$request) {
+    diagnosticRequest();
+    const req = this.$request ? createRequestContext() : null;
+    diagnosticTrace('context-ready');
+    // 入口先检查；控制接口仍可上报新版本、读取或清理本地数据。
+    if (!req || !req.path.startsWith("/api/"))
+      assertClientVersion(storedClientVersion());
+    if (!req) {
       await runScheduledRefresh();
       return finish();
     }
 
-    const response = await routeRequest()
-    if (response) return finish(response)
+    const response = await routeRequest(req)
+    if (response) {
+      if (response.response?.status === 426)
+        notify("TestFlight 中转：版本不支持", exactParse(response.response.body).error?.message || "请检查 TestFlight 版本，最低支持 4.4.1");
+      return finish(response)
+    }
 
-    finish(await forwardRequest(createRequestContext()))
+    finish(await forwardRequest(req))
   } catch (error) {
+    if (error?.status === 426) notify("TestFlight 中转：版本不支持", error.message);
     logError(error);
-    finish({ response: createErrorResponse(error) });
+    finish(this.$request ? { response: createErrorResponse(error) } : undefined);
   }
 };
 
