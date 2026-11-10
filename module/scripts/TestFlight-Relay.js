@@ -1,32 +1,3 @@
-// TF Relay · Loon initialize diagnostics · 2026-11-10
-
-const diagnosticShape = value => ({
-  type: value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value,
-  length: typeof value === 'string' ? value.length : null,
-  bytes: typeof value?.byteLength === 'number' ? value.byteLength : null,
-  format: typeof value !== 'string' ? null : !value.trim() ? 'empty'
-    : /^[{[]/.test(value.trim()) ? 'json-container' : value.trim()[0] === '"' ? 'quoted'
-    : /^[^=&\s]+=[^]*$/.test(value) ? 'key-value' : 'other',
-});
-const diagnosticTrace = (stage, data = {}) => console.log('[DEBUG-loon-init] ' + JSON.stringify({stage, ...data}));
-const diagnosticRequest = () => {
-  const request = globalThis.$request;
-  const headers = request?.headers || {};
-  const field = name => Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
-  const media = String(field('content-type') || '').split(';')[0].toLowerCase();
-  const length = String(field('content-length') || '');
-  diagnosticTrace('entry', {
-    platform: globalThis.$loon ? 'Loon' : globalThis.$task ? 'QX' : 'Surge-compatible',
-    request: !!request,
-    method: ['GET','POST','DELETE','PUT','PATCH','HEAD','OPTIONS'].includes(request?.method) ? request.method : 'other',
-    initialize: /\/api\/v1\/control\/initialize(?:[?#]|$)/.test(request?.url || ''),
-    argument: diagnosticShape(globalThis.$argument), body: diagnosticShape(request?.body),
-    bodyBytes: diagnosticShape(request?.bodyBytes),
-    contentType: ['application/json','text/plain','application/octet-stream','application/x-www-form-urlencoded'].includes(media) ? media : 'other-or-missing',
-    contentLength: /^\d+$/.test(length) ? Number(length) : null,
-    contentEncodingPresent: field('content-encoding') !== undefined,
-  });
-};
 // ===== 平台适配层：请求 / 永久存储 / 结束执行 =====
 // 当前适配 Surge；更换平台只替换本区 API 实现，不放账号、签名或缓存策略。
 /** 通用 HTTP：首次调用探测并缓存适配器；GET/POST、Promise、超时（秒）。 */
@@ -60,7 +31,8 @@ const http = (() => {
     /** @type {ReturnType<typeof setTimeout>} */
     const timer = setTimeout(() => reject(Object.assign(new Error("HTTP timeout"), { code: "HTTP_TIMEOUT" })), seconds * 1000)
     try {
-      send({ ...op, method, timeout: seconds }, response => {
+      // 业务层统一秒制；只有 Surge 原生请求使用秒，其他平台使用毫秒。
+      send({ ...op, method, timeout: globalThis.$environment?.["surge-version"] ? seconds : seconds * 1000 }, response => {
         if (response.error) return reject(response.error)
         resolve({ status: response.status ?? response.statusCode, headers: response.headers || {}, body: response.body ?? "" })
       })
@@ -105,7 +77,6 @@ const storage = {
  * @param {Object} [result]
  */
 const finish = result => {
-  diagnosticTrace('finish', {status: result?.response?.status ?? null, forwarded: !!result?.url});
      if (globalThis.$task && result)  {
          const { response = result } = result
          $done({ ...response, status: `HTTP/1.1 ${response.status} OK` });
@@ -224,8 +195,7 @@ const clean = (headers, extra = []) => {
 /**
  * @param {*} text
  */
-const exactParse = (text, diagnosticLabel = 'other') => {
-  diagnosticTrace('json-input', {source: diagnosticLabel, ...diagnosticShape(text)});
+const exactParse = text => {
   const tokens = /"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
   try {
     return JSON.parse(
@@ -236,7 +206,6 @@ const exactParse = (text, diagnosticLabel = 'other') => {
       })
     );
   } catch (error) {
-    diagnosticTrace('json-failed', {source: diagnosticLabel, ...diagnosticShape(text)});
     logError(new Error("Malformed JSON"));
     throw new Error("Malformed JSON");
   }
@@ -1634,7 +1603,7 @@ const loadAccounts = req => {
 const createRequestContext = () => {
   const config =
     typeof $argument === "string" && $argument.trim()
-      ? exactParse($argument, "script-argument")
+      ? exactParse($argument)
       : {};
   if (Object.keys(config).some(name => name !== "timeout"))
     throw new Error("Only timeout policy is supported");
@@ -2289,9 +2258,7 @@ const runScheduledRefresh = async (trigger = "cron") => {
 const controlStatus = () => controlReply(200, { data: { version: 1, client: storage.readJSON(CLIENT_PROTOCOL_KEY) } });
 const controlBody = names => {
   let body;
-  try { body = exactParse($request.body || "", "control-body"); }
-  catch { diagnosticTrace('control-body-rejected'); }
-  diagnosticTrace('control-body-parsed', {object: importObject(body), clientPresent: !!body?.client, devicePresent: !!body?.device});
+  try { body = exactParse($request.body || ""); } catch { /* 错误不回显正文。 */ }
   if (!importObject(body) || Object.keys(body).some(name => !names.includes(name)))
     throw importError(400, "invalid_request", "控制请求格式不正确");
   return body;
@@ -2318,9 +2285,7 @@ const resetControl = () => {
 const initializeControl = () => {
   const body = controlBody(["device", "client"]);
   if (!importObject(body.device)) throw importError(400, "invalid_request", "缺少公开设备资料");
-  diagnosticTrace('initialize-version-start', {client: diagnosticShape(body.client)});
   const client = configureClientProtocol(body.client);
-  diagnosticTrace('initialize-version-saved');
   const configured = storage.readJSON("tf.management.device");
   if (configured?.deviceVendorId && importText(configured.deviceModel) && importText(configured.deviceName) && header(configured.headers, "User-Agent"))
     return controlReply(200, { data: { initialized: true, client } });
@@ -2330,7 +2295,6 @@ const initializeControl = () => {
   const device = configured?.deviceVendorId || devices[0] || uuid();
   const previous = (records[key("registry", device)] || []).map(owner => records[key("context", device, owner)]).find(Boolean);
   const headers = importDeviceHeaders(device, {}, { ...body.device.headers, ...configured?.headers });
-  diagnosticTrace('initialize-device-save');
   const profile = { deviceVendorId: device, deviceModel: previous?.deviceModel || configured?.deviceModel || body.device.deviceModel,
     deviceName: previous?.deviceName || configured?.deviceName || body.device.deviceName, headers };
   if (!importText(profile.deviceModel) || !importText(profile.deviceName) || !header(headers, "User-Agent"))
@@ -2469,9 +2433,7 @@ const routeRequest = (() => {
 // main 只负责执行类型、路由交付与默认转发；错误出口保持不变。
 const main = async () => {
   try {
-    diagnosticRequest();
     const req = this.$request ? createRequestContext() : null;
-    diagnosticTrace('context-ready');
     // 入口先检查；控制接口仍可上报新版本、读取或清理本地数据。
     if (!req || !req.path.startsWith("/api/"))
       assertClientVersion(storedClientVersion());
